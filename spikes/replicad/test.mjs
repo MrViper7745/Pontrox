@@ -1,4 +1,4 @@
-import opencascade from "replicad-opencascadejs/src/replicad_single.js";
+import opencascade from "./node_modules/replicad-opencascadejs/dist/replicad_single.js";
 import { setOC, drawRoundedRectangle, drawCircle } from "replicad";
 import { writeFile, mkdir } from "node:fs/promises";
 
