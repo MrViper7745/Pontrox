@@ -1,3 +1,4 @@
+import { layoutForPrint } from "./stl";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
@@ -101,7 +102,7 @@ export async function renderScad(
     await run("openscad", [...args, "-o", output, input], { timeout: 20000 });
     const stl = await readFile(output);
     if (stl.length < 100) throw new Error("The model is empty");
-    return stl;
+    return layoutForPrint(stl).stl;
   } catch (e) {
     const err = e as Error & { stderr?: string; killed?: boolean; code?: string };
     if (err.killed) throw new Error("Render took too long");

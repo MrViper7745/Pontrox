@@ -45,7 +45,15 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt }),
       });
-      const j = await res.json();
+      const raw = await res.text();
+let j;
+try {
+  j = JSON.parse(raw);
+} catch {
+  throw new Error(
+    "The connection dropped before the answer arrived (probably too slow). Check the terminal and try again."
+  );
+}
       if (!res.ok) throw new Error(j.error ?? "Generation failed");
       setPart(j);
       setValues(Object.fromEntries(j.params.map((p: Spec) => [p.key, p.default])));
