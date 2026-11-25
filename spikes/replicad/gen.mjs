@@ -1,14 +1,18 @@
 // Run from /workspaces/Pontrox/spikes/replicad:
 //   node --env-file=../../app/.env.local gen.mjs
-//   ONLY=1,4 node --env-file=../../app/.env.local gen.mjs
+//   ONLY=1,4 node --env-file=../../app/.env.local gen.mjs     (only those prompts)
+//   NOEX=1 ...   skip the worked examples      NOAPI=1 ...   skip the API sheet
 // WARNING: runs AI-written JavaScript with node:vm, which is NOT a real sandbox.
 // Fine for a local experiment on your own machine; never expose this to other users.
+import { makeSafe } from "./safe.mjs";
+import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { writeFile, mkdir, rm } from "node:fs/promises";
 import vm from "node:vm";
 import * as replicad from "replicad";
 import opencascade from "./node_modules/replicad-opencascadejs/dist/replicad_single.js";
 
 replicad.setOC(await opencascade());
+console.log("Protected from deletion:", makeSafe().join(", ") || "nothing");
 
 const OUT = "../../tests/out/replicad";
 const MODEL = process.env.GEMINI_MODEL ?? "gemini-3.1-flash-lite";
@@ -51,7 +55,6 @@ replicad quick reference (millimetres):
 - Boolean: a.fuse(b), a.cut(b), a.intersect(b).
 - Move: shape.translate([x, y, z]), shape.translateX(d), shape.translateY(d), shape.translateZ(d), shape.rotate(angleDegrees, [px, py, pz], [dx, dy, dz]).
 - Edges (optional, can fail on complex shapes): shape.fillet(radius, (e) => e.inDirection("Z")).
-- A sketch (the result of .sketchOnPlane(...)) can be extruded or revolved only ONCE; it is consumed. To make a second solid from the same outline, call the draw function again to get a new drawing and sketch it again. Likewise, build a fresh shape each time you need one instead of reusing a variable that has already been used in fuse(), cut() or intersect().
 - 2D drawings (drawRectangle, drawCircle, ...) are moved with .translate(x, y) and rotated with .rotate(angleDegrees). translateX, translateY and translateZ exist only on 3D solids.
 
 Rules:
@@ -65,10 +68,31 @@ Rules:
 - Every part must stay ONE connected solid at the minimum AND maximum of every parameter. Overlap fused shapes by at least 1 mm even when the wall thickness is at its minimum.
 - If a previous attempt failed, fix the problem and return the full JSON again.`;
 
+// Optional extras: the real API (api.txt, made by makeapi.mjs) and worked examples (examples/*.json)
+let EXTRA = "";
+const extras = [];
+if (!process.env.NOAPI && existsSync("api.txt")) {
+  EXTRA +=
+    "\n\nThe REAL replicad API, extracted from the library. Use ONLY these functions and methods; anything not listed does not exist:\n" +
+    readFileSync("api.txt", "utf8").slice(0, 30000);
+  extras.push("api.txt");
+}
+if (!process.env.NOEX && existsSync("examples")) {
+  const ex = readdirSync("examples")
+    .filter((f) => f.endsWith(".json"))
+    .map((f) => readFileSync(`examples/${f}`, "utf8"))
+    .join("\n\n");
+  if (ex) {
+    EXTRA += "\n\nWORKING EXAMPLES: complete, verified answers to other requests. Copy their patterns:\n" + ex;
+    extras.push("examples");
+  }
+}
+console.log(`Model: ${MODEL}. Extras in prompt: ${extras.join(" + ") || "none"}`);
+
 async function ask(history) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error("GEMINI_API_KEY missing (run with --env-file=../../app/.env.local)");
-    for (let t = 0; t < 6; t++) {
+  for (let t = 0; t < 6; t++) {
     const res = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`,
       {
@@ -77,7 +101,7 @@ async function ask(history) {
         body: JSON.stringify({
           contents: history.map((m, i) => ({
             role: m.role,
-            parts: [{ text: i === 0 ? `${SYSTEM}\n\nUser request:\n${m.text}` : m.text }],
+            parts: [{ text: i === 0 ? `${SYSTEM}${EXTRA}\n\nUser request:\n${m.text}` : m.text }],
           })),
           generationConfig: { maxOutputTokens: 16384, responseMimeType: "application/json" },
         }),
@@ -85,7 +109,7 @@ async function ask(history) {
       }
     );
     if (res.status === 503 || res.status === 429) {
-        await sleep(5000 * (t + 1));
+      await sleep(5000 * (t + 1));
       continue;
     }
     if (!res.ok) throw new Error(`AI error ${res.status}: ${(await res.text()).slice(0, 200)}`);
@@ -130,7 +154,8 @@ function runCode(code, values) {
   try {
     result = vm.runInContext(`(function () {\n${code}\n})()`, ctx, { timeout: 20000 });
   } catch (e) {
-    throw new Error(`Code error: ${e.message}`);
+    // NEW: raw kernel exceptions have no message; give the AI something to act on
+    throw new Error(`Code error: ${e?.message ?? "a geometry operation failed (the shape is invalid at these values)"}`);
   }
   const names = result && typeof result === "object" ? Object.keys(result) : [];
   if (names.length < 1 || names.length > 6) {
@@ -222,28 +247,63 @@ function build(code, values) {
   return { parts, info };
 }
 
+// NEW: slider-extreme test, used both while generating and in the final report
+function sliderProblems(code, params) {
+  const defaults = Object.fromEntries(params.map((p) => [p.key, p.default]));
+  const cases = [
+    ["all-min", Object.fromEntries(params.map((p) => [p.key, p.min]))],
+    ["all-max", Object.fromEntries(params.map((p) => [p.key, p.max]))],
+  ];
+  for (const p of params) {
+    cases.push([`${p.key}=min`, { ...defaults, [p.key]: p.min }]);
+    cases.push([`${p.key}=max`, { ...defaults, [p.key]: p.max }]);
+  }
+  const bad = [];
+  for (const [label, values] of cases) {
+    try {
+      const r = build(code, values);
+      const problem = checkParts(r.info);
+      // A layout bigger than the bed is a warning for users, not a build failure
+      if (problem && !problem.startsWith("The layout is")) throw new Error(problem);
+    } catch (err) {
+      if (String(err.message).startsWith("HARNESS")) throw err;
+      bad.push(`${label}: ${String(err.message).slice(0, 160)}`);
+    }
+  }
+  return { cases: cases.length, bad };
+}
+
 async function generate(prompt) {
   const history = [{ role: "user", text: prompt }];
   const failures = [];
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  for (let attempt = 1; attempt <= 4; attempt++) { // NEW: 4 attempts
     const text = await ask(history);
-      let lastCode = "";
+    let lastCode = "";
     try {
       const s = text.indexOf("{"), e = text.lastIndexOf("}");
       if (s < 0 || e <= s) throw new Error("Reply was not valid JSON");
       const parsed = JSON.parse(text.slice(s, e + 1));
       const params = validateParams(parsed.params);
       const code = String(parsed.code ?? "");
-        lastCode = code;
+      lastCode = code;
       const defaults = Object.fromEntries(params.map((p) => [p.key, p.default]));
       const { parts, info } = build(code, defaults);
       const problem = checkParts(info);
       if (problem) throw new Error(problem);
+
+      // NEW: the sliders must work across their whole range before the part counts as done
+      const sp = sliderProblems(code, params);
+      if (sp.bad.length) {
+        throw new Error(
+          `The sliders break at their limits (${sp.bad.length} of ${sp.cases} tests failed), for example: ${sp.bad.slice(0, 3).join(" | ")}. Make the design stay valid across the whole range, or narrow the range.`
+        );
+      }
+
       const name = String(parsed.name ?? "part").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 40) || "part";
       return { ok: true, attempts: attempt, name, params, code, parts, info };
     } catch (err) {
       if (String(err.message).startsWith("HARNESS")) throw err;
-         await writeFile(`${OUT}/failed-${Date.now()}.js`, `// ${err.message}\n${lastCode}`);
+      await writeFile(`${OUT}/failed-${Date.now()}.js`, `// ${err.message}\n${lastCode}`);
       failures.push(err.message);
       history.push(
         { role: "model", text },
@@ -290,34 +350,16 @@ for (const [i, prompt] of PROMPTS.entries()) {
     row.params = g.params.length;
     row.parts = Object.keys(g.parts).length;
 
-    // Slider-extreme test: all-min, all-max, and each parameter alone at min and max
-    const defaults = Object.fromEntries(g.params.map((p) => [p.key, p.default]));
-    const cases = [
-      ["all-min", Object.fromEntries(g.params.map((p) => [p.key, p.min]))],
-      ["all-max", Object.fromEntries(g.params.map((p) => [p.key, p.max]))],
-    ];
-    for (const p of g.params) {
-      cases.push([`${p.key}=min`, { ...defaults, [p.key]: p.min }]);
-      cases.push([`${p.key}=max`, { ...defaults, [p.key]: p.max }]);
-    }
-    const fails = [];
-    let firstErr = "";
-    for (const [label, values] of cases) {
-      try {
-        const r = build(g.code, values);
-        const problem = checkParts(r.info);
-           if (problem && !problem.startsWith("The layout is")) throw new Error(problem);
-      } catch (err) {
-        if (String(err.message).startsWith("HARNESS")) throw err;
-        fails.push(label);
-        if (!firstErr) firstErr = `${label}: ${err.message}`;
-      }
-    }
-    row.range_fails = fails.length ? `${fails.length}/${cases.length}: ${fails.slice(0, 3).join(", ")}` : `0/${cases.length}`;
-    if (firstErr) console.log(`\n#${i + 1} first slider problem: ${firstErr.slice(0, 250)}`);
+    // Final slider report (should be 0 now, since generation already requires it)
+    const sp = sliderProblems(g.code, g.params);
+    row.range_fails = sp.bad.length ? `${sp.bad.length}/${sp.cases}: ${sp.bad[0].slice(0, 40)}` : `0/${sp.cases}`;
 
     await exportParts(String(i + 1), g.parts, g.info);
     await writeFile(`${OUT}/${i + 1}-${g.name}.js`, g.code);
+    await writeFile(
+      `${OUT}/${i + 1}-${g.name}.json`,
+      JSON.stringify({ name: g.name, params: g.params, code: g.code })
+    );
     row.result = "ok: " + g.name;
   } catch (err) {
     row.result = "ERROR: " + String(err.message).slice(0, 80);
