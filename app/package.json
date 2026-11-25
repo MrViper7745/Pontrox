@@ -2,11 +2,13 @@
   "name": "app",
   "version": "0.1.0",
   "private": true,
-  "scripts": {
+    "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "build:cad": "esbuild cad/worker-src.js --bundle --format=esm --platform=browser --outfile=public/cad/worker.js --external:node:* --external:fs --external:path --external:crypto --external:url --external:os --external:module --external:worker_threads --external:child_process && cp node_modules/replicad-opencascadejs/dist/replicad_single.wasm public/cad/",
+    "predev": "npm run build:cad"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.9",
@@ -14,6 +16,8 @@
     "next": "16.4.6",
     "react": "19.3.0",
     "react-dom": "19.3.0",
+    "replicad": "^1.2.1",
+    "replicad-opencascadejs": "^1.2.1",
     "three": "^0.187.0"
   },
   "devDependencies": {
@@ -22,6 +26,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/three": "^0.187.0",
+    "esbuild": "^0.28.2",
     "eslint": "^9",
     "eslint-config-next": "16.4.6",
     "tailwindcss": "4.3.3",

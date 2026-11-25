@@ -1,3 +1,4 @@
 tests/out/
 .venv/
 node_modules/
+app/public/cad/

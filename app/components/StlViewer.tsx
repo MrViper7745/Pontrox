@@ -11,26 +11,30 @@ function Model({ data }: { data: ArrayBuffer }) {
     g.computeVertexNormals();
     return g;
   }, [data]);
-
   return (
-    <Center>
-      {/* OpenSCAD uses Z-up, three.js uses Y-up, so rotate the model */}
-      <mesh geometry={geometry} rotation={[-Math.PI / 2, 0, 0]}>
-        <meshStandardMaterial color="#4f8ef7" roughness={0.5} metalness={0.1} />
-      </mesh>
-    </Center>
+    <mesh geometry={geometry}>
+      <meshStandardMaterial color="#4f8ef7" roughness={0.5} metalness={0.1} />
+    </mesh>
   );
 }
 
-export default function StlViewer({ data }: { data: ArrayBuffer | null }) {
+export default function StlViewer({ data }: { data: ArrayBuffer | ArrayBuffer[] | null }) {
+  const list = data ? (Array.isArray(data) ? data : [data]) : [];
   return (
     <Canvas camera={{ position: [120, 100, 120], fov: 45 }}>
       <ambientLight intensity={0.7} />
       <directionalLight position={[60, 120, 60]} intensity={1.4} />
       <directionalLight position={[-60, -40, -60]} intensity={0.4} />
-      {data && (
+      {list.length > 0 && (
         <Bounds fit clip observe margin={1.5}>
-          <Model data={data} />
+          <Center>
+            {/* The CAD files use Z as up, three.js uses Y */}
+            <group rotation={[-Math.PI / 2, 0, 0]}>
+              {list.map((d, i) => (
+                <Model key={i} data={d} />
+              ))}
+            </group>
+          </Center>
         </Bounds>
       )}
       <OrbitControls makeDefault />
