@@ -1,3 +1,5 @@
+import type { Bed } from "./printers";
+
 export type Spec = {
   key: string;
   label: string;
@@ -7,8 +9,9 @@ export type Spec = {
   default: number;
 };
 
-export type BuiltPart = { name: string; stl: ArrayBuffer; step: ArrayBuffer; size: number[] };
-export type Built = { parts: BuiltPart[]; warning: string | null };
+export type BuiltPart = { name: string; stl: ArrayBuffer; step: ArrayBuffer; size: number[]; volume: number };
+export type Check = { status: "pass" | "warn"; label: string };
+export type Built = { parts: BuiltPart[]; checks: Check[] };
 
 type Reply = { id: number; ok: boolean; error?: string; [k: string]: unknown };
 
@@ -87,17 +90,17 @@ export class CadClient {
     if (!r.ok) throw new Error(String(r.error));
   }
 
-  async validate(code: string, params: Spec[]) {
+  async validate(code: string, params: Spec[], bed: Bed) {
     this.uses++;
-    const r = await this.call({ type: "validate", code, params }, 90000);
+    const r = await this.call({ type: "validate", code, params, bed }, 90000);
     if (!r.ok) throw new Error(String(r.error));
   }
 
-  async build(code: string, values: Record<string, number>): Promise<Built> {
+  async build(code: string, values: Record<string, number>, bed: Bed): Promise<Built> {
     this.uses++;
-    const r = await this.call({ type: "build", code, values }, 60000);
+    const r = await this.call({ type: "build", code, values, bed }, 60000);
     if (!r.ok) throw new Error(String(r.error));
-    return { parts: r.parts as BuiltPart[], warning: (r.warning as string | null) ?? null };
+    return { parts: r.parts as BuiltPart[], checks: (r.checks as Check[]) ?? [] };
   }
 
   dispose() {

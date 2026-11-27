@@ -3,8 +3,15 @@ import * as replicad from "replicad";
 import { makeSafe } from "./safe.js";
 
 const GAP = 10;
-const BED = [220, 220, 250];
+const DEFAULT_BED = [220, 220, 250];
 let ready = null;
+
+function normBed(bed) {
+  if (Array.isArray(bed) && bed.length === 3 && bed.every((n) => Number.isFinite(n) && n >= 20 && n <= 2000)) {
+    return bed;
+  }
+  return DEFAULT_BED;
+}
 
 async function init() {
   const OC = await opencascade({ locateFile: () => "/cad/replicad_single.wasm" });
@@ -102,10 +109,28 @@ function analyze(shape) {
       max[k] = Math.max(max[k], p[k]);
     }
   }
-  return { pieces: roots.size, min, max, size: max.map((x, k) => x - min[k]) };
+    let vol = 0;
+  for (let i = 0; i < t.length; i += 3) {
+    const a = t[i] * 3, b = t[i + 1] * 3, c = t[i + 2] * 3;
+    vol +=
+      v[a] * (v[b + 1] * v[c + 2] - v[b + 2] * v[c + 1]) -
+      v[a + 1] * (v[b] * v[c + 2] - v[b + 2] * v[c]) +
+      v[a + 2] * (v[b] * v[c + 1] - v[b + 1] * v[c]);
+  }
+  return { pieces: roots.size, min, max, size: max.map((x, k) => x - min[k]), volume: Math.abs(vol) / 6000 };
 }
 
-function checkParts(info) {
+function layoutSize(info) {
+  const sizes = Object.values(info).map((a) => a.size);
+  return {
+    width: sizes.reduce((s, z) => s + z[0], 0) + GAP * (sizes.length - 1),
+    depth: Math.max(...sizes.map((z) => z[1])),
+    tall: Math.max(...sizes.map((z) => z[2])),
+  };
+}
+
+// Returns a message for the AI, or null when the design is fine
+function checkParts(info, bed) {
   for (const [name, a] of Object.entries(info)) {
     if (a.pieces !== 1) {
       return `Part "${name}" builds as ${a.pieces} separate pieces. Each part must be ONE connected solid: overlap fused shapes by at least 0.5 mm.`;
@@ -119,14 +144,43 @@ function checkParts(info) {
       return `Part "${name}" would print standing on a thin edge (${w.toFixed(0)} x ${d.toFixed(0)} mm footprint, ${h.toFixed(0)} mm tall). Model it in its printing orientation, largest flat face down.`;
     }
   }
-  const sizes = Object.values(info).map((a) => a.size);
-  const width = sizes.reduce((s, z) => s + z[0], 0) + GAP * (sizes.length - 1);
-  const depth = Math.max(...sizes.map((z) => z[1]));
-  const tall = Math.max(...sizes.map((z) => z[2]));
-  if (width > BED[0] || depth > BED[1] || tall > BED[2]) {
-    return `The layout is ${width.toFixed(0)} x ${depth.toFixed(0)} x ${tall.toFixed(0)} mm, bigger than a typical ${BED.join(" x ")} mm print bed. Use smaller default sizes.`;
+  const { width, depth, tall } = layoutSize(info);
+  if (width > bed[0] || depth > bed[1] || tall > bed[2]) {
+    return `The layout is ${width.toFixed(0)} x ${depth.toFixed(0)} x ${tall.toFixed(0)} mm, bigger than the user's ${bed.join(" x ")} mm print bed. Use smaller default sizes.`;
   }
   return null;
+}
+
+// The same checks, written for the user's checks panel
+function describeChecks(info, bed) {
+  const checks = [];
+  for (const [n, a] of Object.entries(info)) {
+    checks.push(
+      a.pieces === 1
+        ? { status: "pass", label: `${n}: one connected solid` }
+        : { status: "warn", label: `${n}: ${a.pieces} separate pieces` }
+    );
+    const [w, d, h] = a.size;
+    const thin = Math.min(w, d, h);
+    checks.push(
+      thin >= 1.2
+        ? { status: "pass", label: `${n}: smallest dimension ${thin.toFixed(1)} mm` }
+        : { status: "warn", label: `${n}: very thin (${thin.toFixed(1)} mm)` }
+    );
+    checks.push(
+      h > 3 * Math.min(w, d) && h > 20
+        ? { status: "warn", label: `${n}: tall and narrow, may be hard to print upright` }
+        : { status: "pass", label: `${n}: stable footprint` }
+    );
+  }
+  const { width, depth, tall } = layoutSize(info);
+  const size = `${width.toFixed(0)} x ${depth.toFixed(0)} x ${tall.toFixed(0)} mm`;
+  checks.push(
+    width <= bed[0] && depth <= bed[1] && tall <= bed[2]
+      ? { status: "pass", label: `Fits your printer (${size} of ${bed.join(" x ")})` }
+      : { status: "warn", label: `Too big for your printer: ${size} against ${bed.join(" x ")}` }
+  );
+  return checks;
 }
 
 // Builds the design, measures every part, then frees the shapes
@@ -141,7 +195,7 @@ function buildAndAnalyze(code, values) {
   }
 }
 
-function sliderProblems(code, params) {
+function sliderProblems(code, params, bed) {
   const defaults = Object.fromEntries(params.map((p) => [p.key, p.default]));
   const cases = [
     ["all-min", Object.fromEntries(params.map((p) => [p.key, p.min]))],
@@ -154,7 +208,7 @@ function sliderProblems(code, params) {
   const bad = [];
   for (const [label, values] of cases) {
     try {
-      const problem = checkParts(buildAndAnalyze(code, values));
+      const problem = checkParts(buildAndAnalyze(code, values), bed);
       // A layout bigger than the bed is a warning for users, not a build failure
       if (problem && !problem.startsWith("The layout is")) throw new Error(problem);
     } catch (err) {
@@ -164,26 +218,25 @@ function sliderProblems(code, params) {
   return { cases: cases.length, bad };
 }
 
-function validateDesign(code, params) {
+function validateDesign(code, params, bed) {
   const defaults = Object.fromEntries(params.map((p) => [p.key, p.default]));
-  const problem = checkParts(buildAndAnalyze(code, defaults));
+  const problem = checkParts(buildAndAnalyze(code, defaults), bed);
   if (problem) throw new Error(problem);
-  const sp = sliderProblems(code, params);
+  const sp = sliderProblems(code, params, bed);
   if (sp.bad.length) {
     throw new Error(
       `The sliders break at their limits (${sp.bad.length} of ${sp.cases} tests failed), for example: ${sp.bad.slice(0, 3).join(" | ")}. Make the design stay valid across the whole range, or narrow the range.`
     );
   }
-  return { cases: sp.cases };
 }
 
 // Builds for display and download: each part is placed flat on the plate, side by side
-async function buildForDisplay(code, values) {
+async function buildForDisplay(code, values, bed) {
   const parts = runCode(code, values);
   try {
     const info = {};
     for (const [n, s] of Object.entries(parts)) info[n] = analyze(s);
-    const warning = checkParts(info);
+    const checks = describeChecks(info, bed);
     const out = [];
     const transfer = [];
     let cursor = 0;
@@ -193,11 +246,11 @@ async function buildForDisplay(code, values) {
       cursor += a.size[0] + GAP;
       const stl = await placed.blobSTL().arrayBuffer();
       const step = await placed.blobSTEP().arrayBuffer();
-      out.push({ name: n, stl, step, size: a.size });
+        out.push({ name: n, stl, step, size: a.size, volume: a.volume });
       transfer.push(stl, step);
       safeDelete(placed);
     }
-    return { out, transfer, warning };
+    return { out, transfer, checks };
   } finally {
     for (const s of Object.values(parts)) safeDelete(s);
   }
@@ -215,19 +268,16 @@ self.onmessage = async (e) => {
       });
     await ready;
     const initMs = Math.round(performance.now() - t0);
+    const bed = normBed(e.data.bed);
 
     if (type === "init") {
       self.postMessage({ id, ok: true, initMs });
     } else if (type === "validate") {
-      const r = validateDesign(e.data.code, e.data.params);
-      self.postMessage({ id, ok: true, ...r });
+      validateDesign(e.data.code, e.data.params, bed);
+      self.postMessage({ id, ok: true });
     } else if (type === "build") {
-      const t1 = performance.now();
-      const r = await buildForDisplay(e.data.code, e.data.values);
-      self.postMessage(
-        { id, ok: true, parts: r.out, warning: r.warning, initMs, buildMs: Math.round(performance.now() - t1) },
-        r.transfer
-      );
+      const r = await buildForDisplay(e.data.code, e.data.values, bed);
+      self.postMessage({ id, ok: true, parts: r.out, checks: r.checks }, r.transfer);
     } else {
       throw new Error("Unknown request");
     }
